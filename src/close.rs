@@ -149,3 +149,48 @@ impl From<CloseCode> for u16 {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn close_code_from_u16() {
+    assert_eq!(CloseCode::from(1000u16), CloseCode::Normal);
+    assert_eq!(CloseCode::from(1001u16), CloseCode::Away);
+    assert_eq!(CloseCode::from(1002u16), CloseCode::Protocol);
+    assert_eq!(CloseCode::from(1005u16), CloseCode::Status);
+    assert_eq!(CloseCode::from(1006u16), CloseCode::Abnormal);
+    assert_eq!(CloseCode::from(1011u16), CloseCode::Error);
+    assert_eq!(CloseCode::from(1015u16), CloseCode::Tls);
+  }
+
+  #[test]
+  fn close_code_to_u16() {
+    assert_eq!(u16::from(CloseCode::Normal), 1000);
+    assert_eq!(u16::from(CloseCode::Away), 1001);
+    assert_eq!(u16::from(CloseCode::Protocol), 1002);
+    assert_eq!(u16::from(CloseCode::Status), 1005);
+    assert_eq!(u16::from(CloseCode::Abnormal), 1006);
+    assert_eq!(u16::from(CloseCode::Error), 1011);
+    assert_eq!(u16::from(CloseCode::Tls), 1015);
+  }
+
+  #[test]
+  fn close_code_round_trip() {
+    for code in [1000u16, 1001, 1002, 1005, 1006, 1011, 1015, 3000, 4000, 500] {
+      assert_eq!(u16::from(CloseCode::from(code)), code);
+    }
+  }
+
+  #[test]
+  fn is_allowed() {
+    assert!(CloseCode::Normal.is_allowed());
+    assert!(CloseCode::Away.is_allowed());
+    assert!(!CloseCode::Status.is_allowed());
+    assert!(!CloseCode::Abnormal.is_allowed());
+    assert!(!CloseCode::Tls.is_allowed());
+    assert!(!CloseCode::Bad(500).is_allowed());
+    assert!(!CloseCode::Reserved(2000).is_allowed());
+  }
+}

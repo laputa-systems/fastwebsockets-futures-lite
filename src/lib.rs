@@ -12,173 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! _fastwebsockets_ is a minimal, fast WebSocket server implementation.
+//! _fastwebsockets-futures_ is a vendored adaptation of fastwebsockets that uses
+//! `futures-lite::io` traits instead of `tokio::io`.
 //!
-//! [https://github.com/denoland/fastwebsockets](https://github.com/denoland/fastwebsockets)
+//! It provides a minimal, fast WebSocket frame parser and server implementation.
 //!
 //! Passes the _Autobahn|TestSuite_ and fuzzed with LLVM's _libfuzzer_.
-//!
-//! You can use it as a raw websocket frame parser and deal with spec compliance yourself, or you can use it as a full-fledged websocket server.
-//!
-//! # Example
-//!
-//! ```
-//! use tokio::net::TcpStream;
-//! use fastwebsockets::{WebSocket, OpCode, Role};
-//! use anyhow::Result;
-//!
-//! async fn handle(
-//!   socket: TcpStream,
-//! ) -> Result<()> {
-//!   let mut ws = WebSocket::after_handshake(socket, Role::Server);
-//!   ws.set_writev(false);
-//!   ws.set_auto_close(true);
-//!   ws.set_auto_pong(true);
-//!
-//!   loop {
-//!     let frame = ws.read_frame().await?;
-//!     match frame.opcode {
-//!       OpCode::Close => break,
-//!       OpCode::Text | OpCode::Binary => {
-//!         ws.write_frame(frame).await?;
-//!       }
-//!       _ => {}
-//!     }
-//!   }
-//!   Ok(())
-//! }
-//! ```
-//!
-//! ## Fragmentation
-//!
-//! By default, fastwebsockets will give the application raw frames with FIN set. Other
-//! crates like tungstenite which will give you a single message with all the frames
-//! concatenated.
-//!
-//! For concanated frames, use `FragmentCollector`:
-//! ```
-//! use fastwebsockets::{FragmentCollector, WebSocket, Role};
-//! use tokio::net::TcpStream;
-//! use anyhow::Result;
-//!
-//! async fn handle(
-//!   socket: TcpStream,
-//! ) -> Result<()> {
-//!   let mut ws = WebSocket::after_handshake(socket, Role::Server);
-//!   let mut ws = FragmentCollector::new(ws);
-//!   let incoming = ws.read_frame().await?;
-//!   // Always returns full messages
-//!   assert!(incoming.fin);
-//!   Ok(())
-//! }
-//! ```
-//!
-//! _permessage-deflate is not supported yet._
-//!
-//! ## HTTP Upgrades
-//!
-//! Enable the `upgrade` feature to do server-side upgrades and client-side
-//! handshakes.
-//!
-//! This feature is powered by [hyper](https://docs.rs/hyper).
-//!
-//! ```
-//! use fastwebsockets::upgrade::upgrade;
-//! use http_body_util::Empty;
-//! use hyper::{Request, body::{Incoming, Bytes}, Response};
-//! use anyhow::Result;
-//!
-//! async fn server_upgrade(
-//!   mut req: Request<Incoming>,
-//! ) -> Result<Response<Empty<Bytes>>> {
-//!   let (response, fut) = upgrade(&mut req)?;
-//!
-//!   tokio::spawn(async move {
-//!     let ws = fut.await;
-//!     // Do something with the websocket
-//!   });
-//!
-//!   Ok(response)
-//! }
-//! ```
-//!
-//! Use the `handshake` module for client-side handshakes.
-//!
-//! ```
-//! use fastwebsockets::handshake;
-//! use fastwebsockets::FragmentCollector;
-//! use hyper::{Request, body::Bytes, upgrade::Upgraded, header::{UPGRADE, CONNECTION}};
-//! use http_body_util::Empty;
-//! use hyper_util::rt::TokioIo;
-//! use tokio::net::TcpStream;
-//! use std::future::Future;
-//! use anyhow::Result;
-//!
-//! async fn connect() -> Result<FragmentCollector<TokioIo<Upgraded>>> {
-//!   let stream = TcpStream::connect("localhost:9001").await?;
-//!
-//!   let req = Request::builder()
-//!     .method("GET")
-//!     .uri("http://localhost:9001/")
-//!     .header("Host", "localhost:9001")
-//!     .header(UPGRADE, "websocket")
-//!     .header(CONNECTION, "upgrade")
-//!     .header(
-//!       "Sec-WebSocket-Key",
-//!       fastwebsockets::handshake::generate_key(),
-//!     )
-//!     .header("Sec-WebSocket-Version", "13")
-//!     .body(Empty::<Bytes>::new())?;
-//!
-//!   let (ws, _) = handshake::client(&SpawnExecutor, req, stream).await?;
-//!   Ok(FragmentCollector::new(ws))
-//! }
-//!
-//! // Tie hyper's executor to tokio runtime
-//! struct SpawnExecutor;
-//!
-//! impl<Fut> hyper::rt::Executor<Fut> for SpawnExecutor
-//! where
-//!   Fut: Future + Send + 'static,
-//!   Fut::Output: Send + 'static,
-//! {
-//!   fn execute(&self, fut: Fut) {
-//!     tokio::task::spawn(fut);
-//!   }
-//! }
-//! ```
-
-#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod close;
 mod error;
 mod fragment;
 mod frame;
-/// Client handshake.
-#[cfg(feature = "upgrade")]
-#[cfg_attr(docsrs, doc(cfg(feature = "upgrade")))]
-pub mod handshake;
 mod mask;
-/// HTTP upgrades.
-#[cfg(feature = "upgrade")]
-#[cfg_attr(docsrs, doc(cfg(feature = "upgrade")))]
-pub mod upgrade;
 
 use bytes::Buf;
 
 use bytes::BytesMut;
-#[cfg(feature = "unstable-split")]
 use std::future::Future;
 
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncWriteExt;
+use futures_lite::io::AsyncRead;
+use futures_lite::io::AsyncReadExt;
+use futures_lite::io::AsyncWrite;
+use futures_lite::io::AsyncWriteExt;
 
 pub use crate::close::CloseCode;
 pub use crate::error::WebSocketError;
-pub use crate::fragment::FragmentCollector;
-#[cfg(feature = "unstable-split")]
 pub use crate::fragment::FragmentCollectorRead;
 pub use crate::frame::Frame;
 pub use crate::frame::OpCode;
@@ -210,19 +68,16 @@ pub(crate) struct ReadHalf {
   buffer: BytesMut,
 }
 
-#[cfg(feature = "unstable-split")]
 pub struct WebSocketRead<S> {
   stream: S,
   read_half: ReadHalf,
 }
 
-#[cfg(feature = "unstable-split")]
 pub struct WebSocketWrite<S> {
   stream: S,
   write_half: WriteHalf,
 }
 
-#[cfg(feature = "unstable-split")]
 /// Create a split `WebSocketRead`/`WebSocketWrite` pair from a stream that has already completed the WebSocket handshake.
 pub fn after_handshake_split<R, W>(
   read: R,
@@ -245,7 +100,6 @@ where
   )
 }
 
-#[cfg(feature = "unstable-split")]
 impl<'f, S> WebSocketRead<S> {
   /// Consumes the `WebSocketRead` and returns the underlying stream.
   #[inline]
@@ -289,7 +143,7 @@ impl<'f, S> WebSocketRead<S> {
   pub async fn read_frame<R, E>(
     &mut self,
     send_fn: &mut impl FnMut(Frame<'f>) -> R,
-  ) -> Result<Frame, WebSocketError>
+  ) -> Result<Frame<'f>, WebSocketError>
   where
     S: AsyncRead + Unpin,
     E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
@@ -309,7 +163,6 @@ impl<'f, S> WebSocketRead<S> {
   }
 }
 
-#[cfg(feature = "unstable-split")]
 impl<'f, S> WebSocketWrite<S> {
   /// Sets whether to use vectored writes. This option does not guarantee that vectored writes will be always used.
   ///
@@ -359,219 +212,19 @@ where
   stream.flush().await.map_err(WebSocketError::IoError)
 }
 
-/// WebSocket protocol implementation over an async stream.
-pub struct WebSocket<S> {
-  stream: S,
-  write_half: WriteHalf,
-  read_half: ReadHalf,
-}
-
-impl<'f, S> WebSocket<S> {
-  /// Creates a new `WebSocket` from a stream that has already completed the WebSocket handshake.
-  ///
-  /// Use the `upgrade` feature to handle server upgrades and client handshakes.
-  ///
-  /// # Example
-  ///
-  /// ```
-  /// use tokio::net::TcpStream;
-  /// use fastwebsockets::{WebSocket, OpCode, Role};
-  /// use anyhow::Result;
-  ///
-  /// async fn handle_client(
-  ///   socket: TcpStream,
-  /// ) -> Result<()> {
-  ///   let mut ws = WebSocket::after_handshake(socket, Role::Server);
-  ///   // ...
-  ///   Ok(())
-  /// }
-  /// ```
-  pub fn after_handshake(stream: S, role: Role) -> Self
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    Self {
-      stream,
-      write_half: WriteHalf::after_handshake(role),
-      read_half: ReadHalf::after_handshake(role),
-    }
-  }
-
-  /// Split a [`WebSocket`] into a [`WebSocketRead`] and [`WebSocketWrite`] half. Note that the split version does not
-  /// handle fragmented packets and you may wish to create a [`FragmentCollectorRead`] over top of the read half that
-  /// is returned.
-  #[cfg(feature = "unstable-split")]
-  pub fn split<R, W>(
-    self,
-    split_fn: impl Fn(S) -> (R, W),
-  ) -> (WebSocketRead<R>, WebSocketWrite<W>)
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-  {
-    let (stream, read, write) = self.into_parts_internal();
-    let (r, w) = split_fn(stream);
-    (
-      WebSocketRead {
-        stream: r,
-        read_half: read,
-      },
-      WebSocketWrite {
-        stream: w,
-        write_half: write,
-      },
-    )
-  }
-
-  /// Consumes the `WebSocket` and returns the underlying stream.
-  #[inline]
-  pub fn into_inner(self) -> S {
-    // self.write_half.into_inner().stream
-    self.stream
-  }
-
-  /// Consumes the `WebSocket` and returns the underlying stream.
-  #[inline]
-  pub(crate) fn into_parts_internal(self) -> (S, ReadHalf, WriteHalf) {
-    (self.stream, self.read_half, self.write_half)
-  }
-
-  /// Sets whether to use vectored writes. This option does not guarantee that vectored writes will be always used.
-  ///
-  /// Default: `true`
-  pub fn set_writev(&mut self, vectored: bool) {
-    self.write_half.vectored = vectored;
-  }
-
-  pub fn set_writev_threshold(&mut self, threshold: usize) {
-    self.read_half.writev_threshold = threshold;
-    self.write_half.writev_threshold = threshold;
-  }
-
-  /// Sets whether to automatically close the connection when a close frame is received. When set to `false`, the application will have to manually send close frames.
-  ///
-  /// Default: `true`
-  pub fn set_auto_close(&mut self, auto_close: bool) {
-    self.read_half.auto_close = auto_close;
-  }
-
-  /// Sets whether to automatically send a pong frame when a ping frame is received.
-  ///
-  /// Default: `true`
-  pub fn set_auto_pong(&mut self, auto_pong: bool) {
-    self.read_half.auto_pong = auto_pong;
-  }
-
-  /// Sets the maximum message size in bytes. If a message is received that is larger than this, the connection will be closed.
-  ///
-  /// Default: 64 MiB
-  pub fn set_max_message_size(&mut self, max_message_size: usize) {
-    self.read_half.max_message_size = max_message_size;
-  }
-
-  /// Sets whether to automatically apply the mask to the frame payload.
-  ///
-  /// Default: `true`
-  pub fn set_auto_apply_mask(&mut self, auto_apply_mask: bool) {
-    self.read_half.auto_apply_mask = auto_apply_mask;
-    self.write_half.auto_apply_mask = auto_apply_mask;
-  }
-
-  pub fn is_closed(&self) -> bool {
-    self.write_half.closed
-  }
-
-  /// Writes a frame to the stream.
-  ///
-  /// # Example
-  ///
-  /// ```
-  /// use fastwebsockets::{WebSocket, Frame, OpCode};
-  /// use tokio::net::TcpStream;
-  /// use anyhow::Result;
-  ///
-  /// async fn send(
-  ///   ws: &mut WebSocket<TcpStream>
-  /// ) -> Result<()> {
-  ///   let mut frame = Frame::binary(vec![0x01, 0x02, 0x03].into());
-  ///   ws.write_frame(frame).await?;
-  ///   Ok(())
-  /// }
-  /// ```
-  pub async fn write_frame(
-    &mut self,
-    frame: Frame<'f>,
-  ) -> Result<(), WebSocketError>
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    self.write_half.write_frame(&mut self.stream, frame).await?;
-    Ok(())
-  }
-
-  /// Flushes the data from the underlying stream.
-  ///
-  /// if the underlying stream is buffered (i.e: TlsStream<TcpStream>), it is needed to call flush
-  /// to be sure that the written frame are correctly pushed down to the bottom stream/channel.
-  ///
-  pub async fn flush(&mut self) -> Result<(), WebSocketError>
-  where
-    S: AsyncWrite + Unpin,
-  {
-    flush(&mut self.stream).await
-  }
-
-  /// Reads a frame from the stream.
-  ///
-  /// This method will unmask the frame payload. For fragmented frames, use `FragmentCollector::read_frame`.
-  ///
-  /// Text frames payload is guaranteed to be valid UTF-8.
-  ///
-  /// # Example
-  ///
-  /// ```
-  /// use fastwebsockets::{OpCode, WebSocket, Frame};
-  /// use tokio::net::TcpStream;
-  /// use anyhow::Result;
-  ///
-  /// async fn echo(
-  ///   ws: &mut WebSocket<TcpStream>
-  /// ) -> Result<()> {
-  ///   let frame = ws.read_frame().await?;
-  ///   match frame.opcode {
-  ///     OpCode::Text | OpCode::Binary => {
-  ///       ws.write_frame(frame).await?;
-  ///     }
-  ///     _ => {}
-  ///   }
-  ///   Ok(())
-  /// }
-  /// ```
-  pub async fn read_frame(&mut self) -> Result<Frame<'f>, WebSocketError>
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    loop {
-      let (res, obligated_send) =
-        self.read_half.read_frame_inner(&mut self.stream).await;
-      let is_closed = self.write_half.closed;
-      if let Some(frame) = obligated_send {
-        if !is_closed {
-          self.write_half.write_frame(&mut self.stream, frame).await?;
-        }
-      }
-      if let Some(frame) = res? {
-        if is_closed && frame.opcode != OpCode::Close {
-          return Err(WebSocketError::ConnectionClosed);
-        }
-        break Ok(frame);
-      }
-    }
-  }
-}
-
 const MAX_HEADER_SIZE: usize = 14;
+
+/// Reads from `stream` into a stack buffer, extending `buf` with the bytes read.
+/// Returns the number of bytes read, or 0 if EOF.
+async fn read_buf<R: AsyncRead + Unpin>(
+  stream: &mut R,
+  buf: &mut BytesMut,
+) -> std::io::Result<usize> {
+  let mut tmp = [0u8; 8192];
+  let n = stream.read(&mut tmp).await?;
+  buf.extend_from_slice(&tmp[..n]);
+  Ok(n)
+}
 
 impl ReadHalf {
   pub fn after_handshake(role: Role) -> Self {
@@ -594,10 +247,10 @@ impl ReadHalf {
   /// has been closed.
   ///
   /// XXX: Do not expose this method to the public API.
-  pub(crate) async fn read_frame_inner<'f, S>(
+  pub(crate) async fn read_frame_inner<'a, S>(
     &mut self,
     stream: &mut S,
-  ) -> (Result<Option<Frame<'f>>, WebSocketError>, Option<Frame<'f>>)
+  ) -> (Result<Option<Frame<'a>>, WebSocketError>, Option<Frame<'a>>)
   where
     S: AsyncRead + Unpin,
   {
@@ -620,13 +273,7 @@ impl ReadHalf {
               frame.payload[0..2].try_into().unwrap(),
             ));
 
-            #[cfg(feature = "simd")]
             if simdutf8::basic::from_utf8(&frame.payload[2..]).is_err() {
-              return (Err(WebSocketError::InvalidUTF8), None);
-            };
-
-            #[cfg(not(feature = "simd"))]
-            if std::str::from_utf8(&frame.payload[2..]).is_err() {
               return (Err(WebSocketError::InvalidUTF8), None);
             };
 
@@ -667,7 +314,7 @@ impl ReadHalf {
 
     // Read the first two bytes
     while self.buffer.remaining() < 2 {
-      eof!(stream.read_buf(&mut self.buffer).await?);
+      eof!(read_buf(stream, &mut self.buffer).await?);
     }
 
     let fin = self.buffer[0] & 0b10000000 != 0;
@@ -691,7 +338,7 @@ impl ReadHalf {
 
     self.buffer.advance(2);
     while self.buffer.remaining() < extra + masked as usize * 4 {
-      eof!(stream.read_buf(&mut self.buffer).await?);
+      eof!(read_buf(stream, &mut self.buffer).await?);
     }
 
     let payload_len: usize = match extra {
@@ -729,7 +376,7 @@ impl ReadHalf {
     // Reserve a bit more to try to get next frame header and avoid a syscall to read it next time
     self.buffer.reserve(payload_len + MAX_HEADER_SIZE);
     while payload_len > self.buffer.remaining() {
-      eof!(stream.read_buf(&mut self.buffer).await?);
+      eof!(read_buf(stream, &mut self.buffer).await?);
     }
 
     // if we read too much it will stay in the buffer, for the next call to this method
@@ -784,34 +431,4 @@ impl WriteHalf {
 
     Ok(())
   }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  const _: () = {
-    const fn assert_unsync<S>() {
-      // Generic trait with a blanket impl over `()` for all types.
-      trait AmbiguousIfImpl<A> {
-        // Required for actually being able to reference the trait.
-        fn some_item() {}
-      }
-
-      impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
-
-      // Used for the specialized impl when *all* traits in
-      // `$($t)+` are implemented.
-      #[allow(dead_code)]
-      struct Invalid;
-
-      impl<T: ?Sized + Sync> AmbiguousIfImpl<Invalid> for T {}
-
-      // If there is only one specialized trait impl, type inference with
-      // `_` can be resolved and this can compile. Fails to compile if
-      // `$x` implements `AmbiguousIfImpl<Invalid>`.
-      let _ = <S as AmbiguousIfImpl<_>>::some_item;
-    }
-    assert_unsync::<WebSocket<tokio::net::TcpStream>>();
-  };
 }

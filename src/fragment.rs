@@ -12,27 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "unstable-split")]
 use std::future::Future;
 
 use crate::error::WebSocketError;
 use crate::frame::Frame;
 use crate::OpCode;
 use crate::ReadHalf;
-use crate::WebSocket;
-#[cfg(feature = "unstable-split")]
 use crate::WebSocketRead;
-use crate::WriteHalf;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
+use futures_lite::io::AsyncRead;
 
 pub enum Fragment {
-  Text(Option<utf8::Incomplete>, Vec<u8>, usize),
+  Text(Vec<u8>, Vec<u8>, usize),
   Binary(Vec<u8>),
 }
 
 impl Fragment {
-  /// Returns the payload of the fragment.
   fn take_buffer(self) -> Vec<u8> {
     match self {
       Fragment::Text(_, buffer, _) => buffer,
@@ -46,114 +40,12 @@ impl Fragment {
 /// This is useful for applications that do not want to deal with fragmented messages and the default behavior of tungstenite.
 /// The payload is buffered in memory until the final fragment is received
 /// so use this when streaming messages is not an option.
-///
-/// # Example
-///
-/// ```
-/// use tokio::net::TcpStream;
-/// use fastwebsockets::{WebSocket, FragmentCollector, OpCode, Role};
-/// use anyhow::Result;
-///
-/// async fn handle_client(
-///   socket: TcpStream,
-/// ) -> Result<()> {
-///   let ws = WebSocket::after_handshake(socket, Role::Server);
-///   let mut ws = FragmentCollector::new(ws);
-///
-///   loop {
-///     let frame = ws.read_frame().await?;
-///     match frame.opcode {
-///       OpCode::Close => break,
-///       OpCode::Text | OpCode::Binary => {
-///         ws.write_frame(frame).await?;
-///       }
-///       _ => {}
-///     }
-///   }
-///   Ok(())
-/// }
-/// ```
-///
-pub struct FragmentCollector<S> {
-  stream: S,
-  read_half: ReadHalf,
-  write_half: WriteHalf,
-  fragments: Fragments,
-}
-
-impl<'f, S> FragmentCollector<S> {
-  /// Creates a new `FragmentCollector` with the provided `WebSocket`.
-  pub fn new(ws: WebSocket<S>) -> FragmentCollector<S>
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    let (stream, read_half, write_half) = ws.into_parts_internal();
-    FragmentCollector {
-      stream,
-      read_half,
-      write_half,
-      fragments: Fragments::new(),
-    }
-  }
-
-  /// Reads a WebSocket frame, collecting fragmented messages until the final frame is received and returns the completed message.
-  ///
-  /// Text frames payload is guaranteed to be valid UTF-8.
-  pub async fn read_frame(&mut self) -> Result<Frame<'f>, WebSocketError>
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    loop {
-      let (res, obligated_send) =
-        self.read_half.read_frame_inner(&mut self.stream).await;
-      let is_closed = self.write_half.closed;
-      if let Some(obligated_send) = obligated_send {
-        if !is_closed {
-          self.write_frame(obligated_send).await?;
-        }
-      }
-      let Some(frame) = res? else {
-        continue;
-      };
-      if is_closed && frame.opcode != OpCode::Close {
-        return Err(WebSocketError::ConnectionClosed);
-      }
-      if let Some(frame) = self
-        .fragments
-        .accumulate(frame, self.read_half.max_message_size)?
-      {
-        return Ok(frame);
-      }
-    }
-  }
-
-  /// See `WebSocket::write_frame`.
-  pub async fn write_frame(
-    &mut self,
-    frame: Frame<'f>,
-  ) -> Result<(), WebSocketError>
-  where
-    S: AsyncRead + AsyncWrite + Unpin,
-  {
-    self.write_half.write_frame(&mut self.stream, frame).await?;
-    Ok(())
-  }
-
-  /// Consumes the `FragmentCollector` and returns the underlying stream.
-  #[inline]
-  pub fn into_inner(self) -> S {
-    self.stream
-  }
-}
-
-#[cfg(feature = "unstable-split")]
 pub struct FragmentCollectorRead<S> {
   stream: S,
   read_half: ReadHalf,
   fragments: Fragments,
 }
 
-#[cfg(feature = "unstable-split")]
 impl<'f, S> FragmentCollectorRead<S> {
   /// Creates a new `FragmentCollector` with the provided `WebSocket`.
   pub fn new(ws: WebSocketRead<S>) -> FragmentCollectorRead<S>
@@ -229,17 +121,10 @@ impl Fragments {
           if self.fragments.is_some() {
             return Err(WebSocketError::InvalidFragment);
           }
-          // Validate UTF-8 for unfragmented text messages
-          if frame.opcode == OpCode::Text {
-            match utf8::decode(&frame.payload) {
-              Ok(_) => {}
-              Err(utf8::DecodeError::Incomplete { .. }) => {
-                return Err(WebSocketError::InvalidUTF8);
-              }
-              Err(utf8::DecodeError::Invalid { .. }) => {
-                return Err(WebSocketError::InvalidUTF8);
-              }
-            }
+          if frame.opcode == OpCode::Text
+            && simdutf8::compat::from_utf8(&frame.payload).is_err()
+          {
+            return Err(WebSocketError::InvalidUTF8);
           }
           return Ok(Some(Frame::new(true, frame.opcode, None, frame.payload)));
         } else {
@@ -247,24 +132,25 @@ impl Fragments {
             return Err(WebSocketError::FrameTooLarge);
           }
           self.fragments = match frame.opcode {
-            OpCode::Text => match utf8::decode(&frame.payload) {
-              Ok(text) => Some(Fragment::Text(
-                None,
-                text.as_bytes().to_vec(),
-                frame.payload.len(),
-              )),
-              Err(utf8::DecodeError::Incomplete {
-                valid_prefix,
-                incomplete_suffix,
-              }) => Some(Fragment::Text(
-                Some(incomplete_suffix),
-                valid_prefix.as_bytes().to_vec(),
-                frame.payload.len(),
-              )),
-              Err(utf8::DecodeError::Invalid { .. }) => {
-                return Err(WebSocketError::InvalidUTF8);
+            OpCode::Text => {
+              let mut buf = Vec::new();
+              let mut pending = Vec::new();
+              let payload = &frame.payload[..];
+              match simdutf8::compat::from_utf8(payload) {
+                Ok(text) => {
+                  buf.extend_from_slice(text.as_bytes());
+                }
+                Err(e) => {
+                  if e.error_len().is_none() {
+                    buf.extend_from_slice(&payload[..e.valid_up_to()]);
+                    pending.extend_from_slice(&payload[e.valid_up_to()..]);
+                  } else {
+                    return Err(WebSocketError::InvalidUTF8);
+                  }
+                }
               }
-            },
+              Some(Fragment::Text(pending, buf, frame.payload.len()))
+            }
             OpCode::Binary => Some(Fragment::Binary(frame.payload.into())),
             _ => unreachable!(),
           };
@@ -275,7 +161,7 @@ impl Fragments {
         None => {
           return Err(WebSocketError::InvalidContinuationFrame);
         }
-        Some(Fragment::Text(data, input, message_len)) => {
+        Some(Fragment::Text(pending, input, message_len)) => {
           let new_message_len = message_len
             .checked_add(frame.payload.len())
             .ok_or(WebSocketError::FrameTooLarge)?;
@@ -284,40 +170,23 @@ impl Fragments {
           }
           *message_len = new_message_len;
 
-          let mut tail = &frame.payload[..];
-          if let Some(mut incomplete) = data.take() {
-            if let Some((result, rest)) =
-              incomplete.try_complete(&frame.payload)
-            {
-              tail = rest;
-              match result {
-                Ok(text) => {
-                  input.extend_from_slice(text.as_bytes());
-                }
-                Err(_) => {
-                  return Err(WebSocketError::InvalidUTF8);
-                }
-              }
-            } else {
-              tail = &[];
-              data.replace(incomplete);
-            }
-          }
+          let mut combined =
+            Vec::with_capacity(pending.len() + frame.payload.len());
+          combined.extend_from_slice(pending);
+          combined.extend_from_slice(&frame.payload);
 
-          match utf8::decode(tail) {
+          match simdutf8::compat::from_utf8(&combined) {
             Ok(text) => {
               input.extend_from_slice(text.as_bytes());
+              pending.clear();
             }
-            Err(utf8::DecodeError::Incomplete {
-              valid_prefix,
-              incomplete_suffix,
-            }) => {
-              input.extend_from_slice(valid_prefix.as_bytes());
-              *data = Some(incomplete_suffix);
-            }
-            Err(utf8::DecodeError::Invalid { valid_prefix, .. }) => {
-              input.extend_from_slice(valid_prefix.as_bytes());
-              return Err(WebSocketError::InvalidUTF8);
+            Err(e) => {
+              input.extend_from_slice(&combined[..e.valid_up_to()]);
+              if e.error_len().is_none() {
+                *pending = combined[e.valid_up_to()..].to_vec();
+              } else {
+                return Err(WebSocketError::InvalidUTF8);
+              }
             }
           }
 

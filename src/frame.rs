@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use tokio::io::AsyncWriteExt;
+use futures_lite::io::AsyncWriteExt;
 
 use bytes::BytesMut;
 use core::ops::Deref;
@@ -240,18 +240,14 @@ impl<'f> Frame<'f> {
 
   /// Checks if the frame payload is valid UTF-8.
   pub fn is_utf8(&self) -> bool {
-    #[cfg(feature = "simd")]
-    return simdutf8::basic::from_utf8(&self.payload).is_ok();
-
-    #[cfg(not(feature = "simd"))]
-    return std::str::from_utf8(&self.payload).is_ok();
+    simdutf8::basic::from_utf8(&self.payload).is_ok()
   }
 
   pub fn mask(&mut self) {
     if let Some(mask) = self.mask {
       crate::mask::unmask(self.payload.to_mut(), mask);
     } else {
-      let mask: [u8; 4] = rand::random();
+      let mask: [u8; 4] = fastrand::u32(..).to_ne_bytes();
       crate::mask::unmask(self.payload.to_mut(), mask);
       self.mask = Some(mask);
     }
@@ -364,4 +360,64 @@ repr_u8! {
 #[inline]
 pub fn is_control(opcode: OpCode) -> bool {
   matches!(opcode, OpCode::Close | OpCode::Ping | OpCode::Pong)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use bytes::BytesMut;
+
+  #[test]
+  fn fmt_head_unmasked_small() {
+    let mut frame = Frame::text(Payload::Bytes(BytesMut::from(&b"hello"[..])));
+    let mut head = [0u8; 16];
+    let size = frame.fmt_head(&mut head);
+    assert_eq!(size, 2);
+    assert_eq!(&head[..2], &[0x81, 0x05]);
+  }
+
+  #[test]
+  fn fmt_head_unmasked_medium() {
+    let payload = vec![0u8; 126];
+    let mut frame = Frame::binary(Payload::Owned(payload));
+    let mut head = [0u8; 16];
+    let size = frame.fmt_head(&mut head);
+    assert_eq!(size, 4);
+    assert_eq!(head[0], 0x82);
+    assert_eq!(head[1], 126);
+    assert_eq!(u16::from_be_bytes([head[2], head[3]]), 126);
+  }
+
+  #[test]
+  fn fmt_head_masked() {
+    let mut frame = Frame::new(
+      true,
+      OpCode::Text,
+      Some([1, 2, 3, 4]),
+      Payload::Owned(b"hi".to_vec()),
+    );
+    let mut head = [0u8; 16];
+    let size = frame.fmt_head(&mut head);
+    assert_eq!(size, 6); // 2 bytes header + 4 bytes mask
+    assert_eq!(&head[..6], &[0x81, 0x82, 1, 2, 3, 4]);
+  }
+
+  #[test]
+  fn write_round_trip() {
+    let data = b"hello world";
+    let mut frame = Frame::text(Payload::Borrowed(data));
+    let mut buf = Vec::new();
+    let written = frame.write(&mut buf).to_vec();
+    assert!(written.len() > data.len()); // includes header
+    assert_eq!(&written[2..], data);
+  }
+
+  #[test]
+  fn frame_close_round_trip() {
+    let frame = Frame::close(1000, b"normal");
+    assert_eq!(frame.opcode, OpCode::Close);
+    assert!(frame.fin);
+    assert_eq!(&frame.payload[..2], &1000u16.to_be_bytes());
+    assert_eq!(&frame.payload[2..], b"normal");
+  }
 }
