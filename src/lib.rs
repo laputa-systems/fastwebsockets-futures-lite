@@ -361,12 +361,23 @@ impl ReadHalf {
       None
     };
 
+    // RFC 6455 requires every frame sent by a client to be masked. Frames sent
+    // by a server are never required to be masked, so keep the client role's
+    // existing permissive behavior unchanged.
+    if self.role == Role::Server && !masked {
+      return Err(WebSocketError::UnmaskedFrame);
+    }
+
     if frame::is_control(opcode) && !fin {
       return Err(WebSocketError::ControlFrameFragmented);
     }
 
-    if opcode == OpCode::Ping && payload_len > 125 {
-      return Err(WebSocketError::PingFrameTooLarge);
+    if frame::is_control(opcode) && payload_len > 125 {
+      return Err(if opcode == OpCode::Ping {
+        WebSocketError::PingFrameTooLarge
+      } else {
+        WebSocketError::ControlFrameTooLarge
+      });
     }
 
     if payload_len >= self.max_message_size {
