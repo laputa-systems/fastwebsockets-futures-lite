@@ -15,17 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fastwebsockets"
-version = "0.10.0"
-dependencies = [
- "bytes",
- "fastrand",
- "futures-lite",
- "simdutf8",
- "thiserror",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -48,6 +37,17 @@ dependencies = [
  "futures-io",
  "parking",
  "pin-project-lite",
+]
+
+[[package]]
+name = "laputa-fastwebsockets-futures-lite"
+version = "0.10.0"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-lite",
+ "simdutf8",
+ "thiserror",
 ]
 
 [[package]]

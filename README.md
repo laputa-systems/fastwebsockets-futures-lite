@@ -1,6 +1,6 @@
-[![Crates.io](https://img.shields.io/crates/v/fastwebsockets.svg)](https://crates.io/crates/fastwebsockets)
+[![Crates.io](https://img.shields.io/crates/v/laputa-fastwebsockets-futures-lite.svg)](https://crates.io/crates/laputa-fastwebsockets-futures-lite)
 
-[Documentation](https://docs.rs/fastwebsockets) | [Benchmarks](benches/)
+[Documentation](https://docs.rs/laputa-fastwebsockets-futures-lite) | [Benchmarks](benches/)
 
 _fastwebsockets_ is a fast WebSocket protocol implementation.
 
@@ -179,5 +179,4 @@ async fn ws_handler(ws: upgrade::IncomingUpgrade) -> impl IntoResponse {
   response
 }
 ```
-
 
